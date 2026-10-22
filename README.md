@@ -2,6 +2,7 @@
 
 AI 自主渗透测试系统 · 二开版（Go 后端 + Next.js 前端 + PostgreSQL)
 
+> 当前发布仓库：[sobinge/artex-ymh1](https://github.com/sobinge/artex-ymh1)。
 > 本项目是 [Autumn-27/ARTEX](https://github.com/Autumn-27/ARTEX) 的二次开发分支，基于上游 v0.3.10，持续吸收上游更新（已跟进至 v0.3.12 并选择性吸收 0.3.11/0.3.12 修复），遵循上游 **AGPL-3.0** 协议（见 `LICENSE`)。
 > 二开方向：把上游「外网自动化探索平台」扩展为「**外网突破 → 立足点 → 内网纵深**」的全流程自主渗透平台，并补齐实战化安全与稳定性短板。
 
@@ -16,10 +17,23 @@ AI 自主渗透测试系统 · 二开版（Go 后端 + Next.js 前端 + PostgreS
 | **安全与反测绘** | 伪装门控（未过门控一律返回逐字节固定 nginx 欢迎页，随机入口路径）、一键放行（2/4/8h 时限审批豁免，deny 不豁免）、RoE 范围强制三态（off/warn/strict) |
 | **蜜罐识别与反 AI 蜜罐防护** | 静态签名识别层（`honeydetect/`，内嵌签名库覆盖 Cowrie/OpenCanary/Kippo/Glastopf/HFish/Dionaea)、资产蜜罐评分与 UI 徽标、planner 处置纪律；针对"以 AI 攻击代理为猎物"的新型陷阱：worker 红线（永不自证）、出口敏感信息拦截、tarpit 抓取熔断、UA 池。设计见 `HONEYPOT-DETECTION-DESIGN.md` |
 | **chains 场景化** | 九类反问思维链骨架按意图自动注入、按漏洞类别的反证判据（误报写 fact、真漏洞才落图）、类别化转向提示 |
+| **资产数据源** | FOFA REST 数据源：凭据掩码、查询预览、归并写入资产图、企业关联、同步状态；导入前复用资产拦截规则 |
+| **通知推送** | 钉钉 / 飞书 / 企业微信 / Telegram / 邮件 / 通用 Webhook；实时或汇总投递、严重度与漏洞类型过滤、失败退避重试、敏感信息掩码、SSRF 防护 |
+| **资产拦截** | 全局黑名单 + 任务级拦截/允许规则，支持精确/模糊域名、IP、URL 与 CIDR；`insert_assets` 与 `add_intent` 双入口校验，任务归档/恢复保留任务级规则 |
+| **IoT / 卫星侦察** | 内置 `iot-protocols`、`mqtt-iov`、`satcom-recon` 方法学技能，默认向 `worker` / `auto` / `pentest` 开放 |
 | **武器库与部署链** | 17 项外部工具钉版清单（`packaging/tools-manifest.json`，启动自检 sha256)、`artex doctor` 部署预检、systemd unit |
 | **稳定性** | 任务 deadline 冻结感知（宿主机睡眠不烧任务）、LLM 调用硬墙钟、会话探活与启动卫生 |
 
 详细二开说明见 `README-FORK.md`；分布式演进评估见 `FUTURE.md`。
+
+### 新增模块快速入口
+
+- **FOFA**：功能 → 资产同步 → FOFA，填写 Email / API Key 后查询并导入。
+- **通知推送**：系统 → 通知推送，创建渠道并配置实时/汇总、级别与漏洞类型过滤。
+- **资产拦截**：系统 → 资产拦截管理全局规则；新建任务 → 高级设置或任务详情「总览」维护任务级规则。
+- **IoT / 卫星**：系统 → Skill 查看 `iot-protocols`、`mqtt-iov`、`satcom-recon`，按 Agent 勾选可见性。
+
+> 通知默认拒绝投递到 `127.0.0.1` / `::1` 等环回地址；如确需投递到本机 webhook，启动时设置 `ARTEX_NOTIFY_ALLOW_LOCAL=1`。
 
 ---
 
@@ -30,8 +44,8 @@ AI 自主渗透测试系统 · 二开版（Go 后端 + Next.js 前端 + PostgreS
 ### 方式一：一键安装脚本
 
 ```bash
-git clone https://github.com/r0th-m/artex-ymh.git
-cd artex-ymh
+git clone https://github.com/sobinge/artex-ymh1.git
+cd artex-ymh1
 ./install.sh
 ```
 
@@ -44,8 +58,8 @@ cd artex-ymh
 > **国内网络**：克隆 GitHub、npm、Go 模块可能需要代理/镜像，参考：`git config --global http.proxy socks5h://127.0.0.1:7890`、`npm config set registry https://registry.npmmirror.com`、`go env -w GOPROXY=https://goproxy.cn,direct`。
 
 ```bash
-git clone https://github.com/r0th-m/artex-ymh.git
-cd artex-ymh
+git clone https://github.com/sobinge/artex-ymh1.git
+cd artex-ymh1
 # 1) 前端静态导出
 cd web && npm ci && npm run build:static && cd ..
 # 2) 拷进内嵌目录(全新克隆下若报目录不存在,先 mkdir -p server/webui/dist)
@@ -73,8 +87,8 @@ journalctl -u artex -f
 仓库的 `docker-compose.yml` 已配置为**从源码构建二开版镜像**(`Dockerfile.source`：前端构建 → Go 编译 → 工具运行时，全部在 Docker 内完成，宿主无需 Go/Node):
 
 ```bash
-git clone https://github.com/r0th-m/artex-ymh.git
-cd artex-ymh
+git clone https://github.com/sobinge/artex-ymh1.git
+cd artex-ymh1
 cp .env.example .env   # 填 POSTGRES_PASSWORD(不要用 # 字符)
 docker compose up -d --build
 ```

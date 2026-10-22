@@ -93,6 +93,14 @@ const audit: Record<string, StatusMeta> = {
   block: { label: "拦截", tone: "red" },
 };
 
+const delivery: Record<string, StatusMeta> = {
+  pending: { label: "待发送", tone: "amber" },
+  sending: { label: "发送中", tone: "blue" },
+  sent: { label: "已发送", tone: "green" },
+  failed: { label: "失败", tone: "red" },
+  skipped: { label: "已跳过", tone: "slate" },
+};
+
 const node: Record<string, StatusMeta> = {
   observed: { label: "观测", tone: "slate" },
   confirmed: { label: "确认", tone: "green" },
@@ -107,6 +115,7 @@ const maps = {
   engine,
   goal,
   audit,
+  delivery,
   node,
 } as const;
 

@@ -23,6 +23,7 @@ import {
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
+import { TaskAssetInterceptCard } from "@/components/task-asset-intercept-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -977,6 +978,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           )}
         </CardContent>
       </Card>
+      {/* 任务级资产拦截/允许规则：与测试范围互补——范围决定“能不能去”，拦截规则决定
+          “明确禁止/放行哪些资产”，保存后下一轮 add_intent / insert_assets 即生效。 */}
+      <TaskAssetInterceptCard taskId={taskId} />
       {/* Heartbeat */}
       <Card>
         <CardHeader>

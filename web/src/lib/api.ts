@@ -16,6 +16,8 @@ import type {
   AgentTrigger,
   ArchiveBatchItem,
   Asset,
+  AssetInterceptRule,
+  AssetInterceptRuleInput,
   Audit,
   AutoAllowState,
   BatchCategoryItem,
@@ -46,6 +48,7 @@ import type {
   FindingsPage,
   FindingTraffic,
   FindingTrafficDetail,
+  FofaRow,
   IntentAsset,
   InterceptApprovalFilter,
   InterceptApprovalRow,
@@ -65,6 +68,10 @@ import type {
   MCPTool,
   MissingSkill,
   ModelTokenStat,
+  NotificationChannel,
+  NotificationDelivery,
+  NotificationFilter,
+  NotificationMeta,
   PendingScopeRow,
   PromptVar,
   PromptVersion,
@@ -266,6 +273,7 @@ export const api = {
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
     coverageEnabled?: boolean;
+    interceptRules?: AssetInterceptRuleInput[];
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
@@ -279,6 +287,7 @@ export const api = {
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
+      intercept_rules: input.interceptRules ?? [],
     }),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
@@ -765,6 +774,68 @@ export const api = {
     brave_search_api_key?: string;
     tavily_search_api_key?: string;
   }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
+  // ---- 资产拦截 ----
+  assetInterceptRules: () =>
+    get<{ rules: AssetInterceptRule[] }>("/asset-intercept/rules").then((r) => arr(r.rules)),
+  createAssetInterceptRule: (rule: Pick<AssetInterceptRule, "enabled" | "kind" | "pattern" | "note">) =>
+    post<AssetInterceptRule>("/asset-intercept/rules", rule),
+  updateAssetInterceptRule: (
+    id: number,
+    rule: Pick<AssetInterceptRule, "enabled" | "kind" | "pattern" | "note">,
+  ) => put<AssetInterceptRule>(`/asset-intercept/rules/${id}`, rule),
+  deleteAssetInterceptRule: (id: number) => del<{ deleted: number }>(`/asset-intercept/rules/${id}`),
+  toggleAssetInterceptRule: (id: number, enabled: boolean) =>
+    post<{ ok: boolean; enabled: boolean }>(`/asset-intercept/rules/${id}/toggle`, { enabled }),
+  taskInterceptRules: (id: string) =>
+    get<{ rules: AssetInterceptRule[] | null }>(`/tasks/${id}/intercept-rules`).then((r) => arr(r.rules)),
+  createTaskInterceptRule: (id: string, rule: AssetInterceptRuleInput) =>
+    post<AssetInterceptRule>(`/tasks/${id}/intercept-rules`, rule),
+  updateTaskInterceptRule: (id: string, ruleId: number, rule: AssetInterceptRuleInput) =>
+    put<AssetInterceptRule>(`/tasks/${id}/intercept-rules/${ruleId}`, rule),
+  deleteTaskInterceptRule: (id: string, ruleId: number) =>
+    del<{ deleted: number }>(`/tasks/${id}/intercept-rules/${ruleId}`),
+  toggleTaskInterceptRule: (id: string, ruleId: number, enabled: boolean) =>
+    post<{ ok: boolean; enabled: boolean }>(`/tasks/${id}/intercept-rules/${ruleId}/toggle`, { enabled }),
+
+  // ---- 漏洞 IM 推送 ----
+  notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
+  notifyChannels: () =>
+    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyCreateChannel: (payload: {
+    name: string;
+    kind: string;
+    enabled?: boolean;
+    mode?: string;
+    config: Record<string, unknown>;
+    filter?: NotificationFilter;
+    rate_per_min?: number;
+  }) => post<{ id: number }>(`/notify/channels`, payload),
+  notifyUpdateChannel: (
+    id: number,
+    payload: {
+      name?: string;
+      kind?: string;
+      enabled?: boolean;
+      mode?: string;
+      config?: Record<string, unknown>;
+      filter?: NotificationFilter;
+      rate_per_min?: number;
+    },
+  ) => patch<{ id: number }>(`/notify/channels/${id}`, payload),
+  notifyDeleteChannel: (id: number) => del<{ ok: boolean }>(`/notify/channels/${id}`),
+  notifyTestChannel: (id: number) => post<{ ok: boolean; latency_ms: number }>(`/notify/channels/${id}/test`),
+  notifyDeliveries: (q: { channelId?: number; state?: string; page?: number; pageSize?: number } = {}) => {
+    const p = new URLSearchParams();
+    if (q.channelId) p.set("channel_id", String(q.channelId));
+    if (q.state) p.set("state", q.state);
+    p.set("page", String(q.page ?? 1));
+    p.set("page_size", String(q.pageSize ?? 50));
+    return get<{ deliveries: NotificationDelivery[]; total: number; page: number; page_size: number }>(
+      `/notify/deliveries?${p.toString()}`,
+    ).then((r) => ({ ...r, deliveries: arr(r.deliveries) }));
+  },
+  notifyRetryDelivery: (id: number) => post<{ ok: boolean }>(`/notify/deliveries/${id}/retry`),
+
   report: async (task?: string) => {
     if (MOCK) return mockReport(task);
     const token = getToken();
@@ -1035,6 +1106,33 @@ export const api = {
       warnings: string[] | null;
       errors: string[] | null;
     }>("/sync/scopesentry/sync", body),
+
+  // ---- 资产同步 (FOFA 数据源) ----
+  fofaStatus: () =>
+    get<{ configured: boolean; reachable: boolean; email: string }>("/sync/fofa/status"),
+  fofaDatasource: (body: { email?: string; key?: string }) =>
+    post<{ configured: boolean; email: string }>("/sync/fofa/datasource", body),
+  fofaQuery: (body: { query: string; size?: number }) =>
+    post<{ total: number; mode: string; rows: FofaRow[] }>("/sync/fofa/query", body).then((r) => ({
+      ...r,
+      rows: arr(r.rows),
+    })),
+  fofaSync: (body: {
+    query: string;
+    size?: number;
+    create_company?: boolean;
+    company_name?: string;
+    page_size?: number;
+  }) =>
+    post<{
+      synced: Record<string, number>;
+      total: number;
+      imported: number;
+      truncated: boolean;
+      companies: string[] | null;
+      warnings: string[] | null;
+      errors: string[] | null;
+    }>("/sync/fofa/sync", body),
 
   // ---- skills (文件系统) ----
   skills: () => get<{ skills: SkillItem[] }>("/skills").then((r) => arr(r.skills)),

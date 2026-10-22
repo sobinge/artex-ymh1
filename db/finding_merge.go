@@ -1,10 +1,13 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Autumn-27/artex/notify"
 )
 
 // 档 A 同入口 finding 自动合并(FIXPLAN 需求一 / ROADMAP C2·C4)。
@@ -300,6 +303,27 @@ ON CONFLICT DO NOTHING`, in.ExplorationID, in.IntentID, RelYields, *cand.NodeID)
 			return nil, err
 		}
 	}
+	// 合并进既有 finding 同样登记推送事件：否则「同一入口的后续利用」只更新库，
+	// 配置了 IM 推送的渠道完全看不到。事件类型单列 finding_merged，便于渠道侧
+	// 区分新漏洞与证据加深（过滤逻辑与 finding_created 一致）。
+	taskID := in.TaskID
+	if taskID == 0 && cand.TaskID != nil {
+		taskID = *cand.TaskID
+	}
+	assetIDs := in.AssetIDs
+	if len(assetIDs) == 0 {
+		assetIDs = cand.AssetIDs
+	}
+	RecordNotificationEventTx(context.Background(), tx, notify.EventFindingMerged, cand.ID, notify.Snapshot{
+		Kind:      notify.EventFindingMerged,
+		FindingID: cand.ID,
+		TaskID:    taskID,
+		VulnClass: in.VulnClass,
+		Name:      in.Name,
+		Severity:  severity,
+		Summary:   summary,
+		AssetIDs:  assetIDs,
+	})
 	if err := AddFindingTrafficTx(tx, cand.ID, prepared); err != nil {
 		return nil, err
 	}

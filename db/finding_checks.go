@@ -228,16 +228,31 @@ func (d *DB) FinishFindingCheck(id int64, status, reason string) error {
 	}
 	switch verdict {
 	case "verified":
-		if _, err := tx.Exec(`UPDATE findings SET status=$1 WHERE id=$2 AND status='pending'`, FindingConfirmed, findingID); err != nil {
+		// 只在 pending 时升级，避免覆盖人工处置；经 SetFindingStatusTx 走同一套
+		// 状态变更通知语义（IM 渠道能看到「待处理 → 已确认」）。
+		var cur string
+		if err := tx.QueryRow(`SELECT status FROM findings WHERE id=$1`, findingID).Scan(&cur); err != nil {
 			return err
 		}
+		if cur == FindingPending {
+			if _, _, _, _, err := SetFindingStatusTx(context.Background(), tx, findingID, FindingConfirmed); err != nil {
+				return err
+			}
+		}
 	case "false_positive":
-		var nodeID *int64
-		err = tx.QueryRow(`UPDATE findings SET status=$1 WHERE id=$2 AND status='pending' RETURNING node_id`, FindingFalsePositive, findingID).Scan(&nodeID)
-		if errors.Is(err, sql.ErrNoRows) {
+		// 同样先确认当前仍是 pending：被人工处置过的漏洞不覆盖，也不产生推送噪音。
+		var cur string
+		if err := tx.QueryRow(`SELECT status FROM findings WHERE id=$1`, findingID).Scan(&cur); err != nil {
+			return err
+		}
+		if cur != FindingPending {
 			break // 已被人工处置过,不覆盖;节点状态也随之不动。
 		}
-		if err != nil {
+		var nodeID *int64
+		if err := tx.QueryRow(`SELECT node_id FROM findings WHERE id=$1`, findingID).Scan(&nodeID); err != nil {
+			return err
+		}
+		if _, _, _, _, err := SetFindingStatusTx(context.Background(), tx, findingID, FindingFalsePositive); err != nil {
 			return err
 		}
 		if nodeID != nil {

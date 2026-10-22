@@ -917,6 +917,10 @@ export interface Settings {
   // 操作约束注入范围(默认都开):把任务的 allow/deny 约束拼进对应 agent 的系统提示。
   constraints_inject_planner?: boolean;
   constraints_inject_worker?: boolean;
+  // 漏洞 IM 推送全局设置。
+  notify_enabled?: boolean;
+  notify_public_base_url?: string;
+  notify_digest_interval_min?: number;
 }
 
 // ---- LLM config ----
@@ -1246,6 +1250,113 @@ export interface SSTask {
   progress?: number;
   creatTime?: string;
   endTime?: string;
+}
+
+// FofaRow — 一行 FOFA 搜索结果（预览用，字段子集，顺序对应后端固定 fields）。
+export interface FofaRow {
+  host: string;
+  ip: string;
+  port: string;
+  protocol: string;
+  domain: string;
+  title: string;
+  server: string;
+}
+
+// ── 资产拦截 ──────────────────────────────────────────────────────────────
+export type AssetInterceptKind =
+  | "exact_domain"
+  | "exact_ip"
+  | "exact_url"
+  | "fuzzy_domain"
+  | "fuzzy_ip"
+  | "fuzzy_url"
+  | "cidr";
+
+export type AssetInterceptAction = "block" | "allow";
+
+export interface AssetInterceptRuleInput {
+  action: AssetInterceptAction;
+  kind: AssetInterceptKind;
+  pattern: string;
+  note: string;
+  enabled: boolean;
+}
+
+export interface AssetInterceptRule {
+  id: number;
+  enabled: boolean;
+  action?: AssetInterceptAction;
+  kind: AssetInterceptKind;
+  pattern: string;
+  note: string;
+  builtin: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── 漏洞 IM 推送 ──────────────────────────────────────────────────────────
+export interface NotificationFilter {
+  min_severity?: string; // "" | low | medium | high | critical
+  task_ids?: number[]; // 空=不限；非空则要求与漏洞所属任务有交集
+  asset_ids?: number[]; // 空=不限；非空则要求与漏洞锚定资产有交集
+  vulnclass_include?: string[]; // 空=全收；非空则要求漏洞类型命中任一关键词
+  vulnclass_exclude?: string[]; // 命中任一关键词即排除（排除优先于包含）
+  on_status_change?: boolean; // 是否也接收漏洞处置状态变更事件
+}
+
+export interface NotificationChannel {
+  id: number;
+  name: string;
+  kind: string;
+  enabled: boolean;
+  mode: "realtime" | "digest";
+  config: Record<string, unknown>;
+  filter: NotificationFilter;
+  rate_per_min: number;
+  created_at: string;
+  updated_at: string;
+  secret_keys: string[];
+}
+
+export interface NotificationKind {
+  kind: string;
+  default_rate_per_min: number;
+  secret_keys: string[];
+}
+
+export interface NotificationMeta {
+  kinds: NotificationKind[];
+  enabled: boolean;
+  public_base_url: string;
+  digest_interval_min: string;
+  defaults: { digest_interval_min: number };
+  stats: {
+    channels: number;
+    channels_on: number;
+    pending: number;
+    failed: number;
+    sent_today: number;
+    backlog_age_ms: number;
+  };
+}
+
+export interface NotificationDelivery {
+  id: number;
+  finding_id: string;
+  event_kind: string;
+  channel_id: number;
+  channel_name: string;
+  channel_kind: string;
+  state: "pending" | "sending" | "sent" | "failed" | "skipped";
+  attempts: number;
+  last_error: string;
+  batch_id?: number;
+  created_at: string;
+  sent_at?: string;
+  next_attempt_at: string;
+  title: string;
+  severity: string;
 }
 
 // ConvTokenSummary — one conversation's token total (+ profile/date) for merging

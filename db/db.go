@@ -306,7 +306,39 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedDefaultInterceptRulesV7(); err != nil {
 		return fmt.Errorf("seed intercept rules v7: %w", err)
 	}
+	if err := d.seedDefaultAssetInterceptRules(); err != nil {
+		return fmt.Errorf("seed asset intercept rules: %w", err)
+	}
 	return nil
+}
+
+// seedDefaultAssetInterceptRules inserts the built-in asset blocklist (fuzzy
+// domain matches for government / education sites) once on first startup. Gated
+// by a settings flag so a user's later disable/delete is never resurrected on
+// restart — same policy as the intercept-rule seed.
+func (d *DB) seedDefaultAssetInterceptRules() error {
+	if v, _, _ := d.GetSetting("asset_intercept_default_rules_v1"); v == "done" {
+		return nil
+	}
+	rules := []struct {
+		kind    string
+		pattern string
+		note    string
+	}{
+		{"fuzzy_domain", ".gov", "[内置] 政府网站 (.gov)"},
+		{"fuzzy_domain", ".gov.cn", "[内置] 政府网站 (.gov.cn)"},
+		{"fuzzy_domain", ".edu", "[内置] 教育网站 (.edu)"},
+		{"fuzzy_domain", ".edu.cn", "[内置] 教育网站 (.edu.cn)"},
+	}
+	for _, r := range rules {
+		if _, err := d.Exec(`
+INSERT INTO asset_intercept_rules(enabled, kind, pattern, note, builtin)
+VALUES (true, $1, $2, $3, true)
+ON CONFLICT DO NOTHING`, r.kind, r.pattern, r.note); err != nil {
+			return fmt.Errorf("asset rule %q: %w", r.pattern, err)
+		}
+	}
+	return d.SetSetting("asset_intercept_default_rules_v1", "done")
 }
 
 // builtinSkillVisibility maps a shipped skill's directory name → the built-in
@@ -318,6 +350,10 @@ ON CONFLICT (name) DO NOTHING`,
 // that MCP is enabled/configured.
 var builtinSkillVisibility = map[string][]string{
 	"api-recon": {"auto", "pentest", "worker"},
+	// IoT / 非 Web 协议测试 skill：默认绑给执行类 agent，与 api-recon 一致。
+	"mqtt-iov":      {"auto", "pentest", "worker"},
+	"satcom-recon":  {"auto", "pentest", "worker"},
+	"iot-protocols": {"auto", "pentest", "worker"},
 }
 
 // seedBuiltinSkillVisibility binds the shipped built-in skills to their default

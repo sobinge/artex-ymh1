@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { AssetInterceptRulesEditor } from "@/components/asset-intercept-rules-editor";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
@@ -121,6 +122,7 @@ import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
+  AssetInterceptRuleInput,
   ChatAttachment,
   Company,
   DeleteTaskOptions,
@@ -3059,6 +3061,8 @@ function CreateTaskSheet({
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
+  // 任务级资产拦截/允许规则：创建时下发，任务启动前即生效，避免“先跑起来再补规则”的空窗。
+  const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]);
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
@@ -3109,6 +3113,10 @@ function CreateTaskSheet({
       toast.error(`最多关联 ${MAX_SOURCE_TASKS} 个来源任务`);
       return;
     }
+    if (interceptRules.some((r) => !r.pattern.trim())) {
+      toast.error("资产拦截规则存在空的匹配内容，请填写或删除该行");
+      return;
+    }
     setCreating(true);
     try {
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
@@ -3125,6 +3133,7 @@ function CreateTaskSheet({
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
         coverageEnabled,
+        interceptRules: interceptRules.map((r) => ({ ...r, pattern: r.pattern.trim(), note: r.note.trim() })),
       });
       toast.success("任务已创建");
       setName("");
@@ -3139,6 +3148,7 @@ function CreateTaskSheet({
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
       setCoverageEnabled(true);
+      setInterceptRules([]);
       setUploadCount(0);
       draftIdRef.current = "";
       setOpen(false);
@@ -3353,6 +3363,14 @@ function CreateTaskSheet({
                     态势图仅展示资产不显示进度，agent 也不再获得范围类工具。关闭不影响「关联企业资产范围」。
                   </p>
                 </div>
+                <Field>
+                  <FieldLabel>任务级资产拦截 / 允许</FieldLabel>
+                  <AssetInterceptRulesEditor value={interceptRules} onChange={setInterceptRules} />
+                  <FieldDescription>
+                    创建时即生效：「拦截」命中后禁止测试该资产；配置任意「允许」规则后，未命中的资产也会被拒绝。
+                    全局黑名单仍优先。留空表示只使用全局规则。
+                  </FieldDescription>
+                </Field>
               </CollapsibleContent>
             </Collapsible>
           </div>

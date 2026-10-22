@@ -237,8 +237,15 @@ func (d *DB) FinishFindingRetest(id int64, status, reason string) error {
 		return err
 	}
 	if finalStatus == "completed" && verdict == "fixed" {
-		if _, err := tx.Exec(`UPDATE findings SET status=$1 WHERE id=$2`, FindingFixed, findingID); err != nil {
+		// 走带通知的状态变更路径：复测「已修复」也能被 on_status_change 渠道收到。
+		var cur string
+		if err := tx.QueryRow(`SELECT status FROM findings WHERE id=$1`, findingID).Scan(&cur); err != nil {
 			return err
+		}
+		if cur != FindingFixed {
+			if _, _, _, _, err := SetFindingStatusTx(context.Background(), tx, findingID, FindingFixed); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()

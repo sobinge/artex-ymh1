@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Autumn-27/artex/notify"
 )
 
 var (
@@ -397,6 +399,18 @@ VALUES($1,'finding',$2,9,'confirmed',$3) RETURNING id`, in.ExplorationID, string
 VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.TaskID, out.NodeID, in.VulnClass, in.Name, in.Severity, in.Summary, in.Evidence, in.Worker, string(raw)).Scan(&out.FindingID); err != nil {
 		return nil, err
 	}
+	// 与漏洞写入同事务登记推送事件：提交即保证「漏洞落库」与「推送任务存在」
+	// 原子一致。失败被限制在 SAVEPOINT 内，不影响漏洞写入（见 RecordNotificationEventTx）。
+	RecordNotificationEventTx(context.Background(), tx, notify.EventFindingCreated, out.FindingID, notify.Snapshot{
+		Kind:      notify.EventFindingCreated,
+		FindingID: out.FindingID,
+		TaskID:    in.TaskID,
+		VulnClass: in.VulnClass,
+		Name:      in.Name,
+		Severity:  in.Severity,
+		Summary:   in.Summary,
+		AssetIDs:  assets,
+	})
 	if err := AddFindingTrafficTx(tx, out.FindingID, prepared); err != nil {
 		return nil, err
 	}

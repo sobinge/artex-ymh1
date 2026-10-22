@@ -160,10 +160,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},
-		provByProfile: map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
+		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	s.initSideQuestions()
-	s.initStage(dataDir) // 受管文件投递暂存(F13);失败降级为关闭,不影响启动
+	s.initStage(dataDir)        // 受管文件投递暂存(F13);失败降级为关闭,不影响启动
 	checkToolsManifest(dataDir) // 期 6 外部工具清单自检(缺失常态,只打汇总日志)
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
@@ -253,6 +253,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
 		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
+		go newNotifier(s).Run(s.ctx)  // 漏洞 IM 推送投递引擎(独立 goroutine,3s tick)
 		// Fill the tool cache for any enabled MCP that has none yet (notably the
 		// seeded browser MCP on first run). Async so it never blocks startup.
 		go s.discoverEmptyMCPsOnStartup()
@@ -757,8 +758,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
 	mux.HandleFunc("POST /api/tasks/{id}/scope", s.taskScopeAdd)
 	mux.HandleFunc("DELETE /api/tasks/{id}/scope/{sid}", s.taskScopeDelete)
-	mux.HandleFunc("GET /api/tasks/{id}/pending-scope", s.pendingScopeList)   // 期 4:待授权网段列表
-	mux.HandleFunc("POST /api/pending-scope/{id}/decide", s.pendingScopeDecide) // 期 4:审批扩 scope
+	mux.HandleFunc("GET /api/tasks/{id}/pending-scope", s.pendingScopeList)        // 期 4:待授权网段列表
+	mux.HandleFunc("POST /api/pending-scope/{id}/decide", s.pendingScopeDecide)    // 期 4:审批扩 scope
 	mux.HandleFunc("GET /api/tasks/{id}/goals", s.listGoals)                       // 目标管理:列出本任务全部目标
 	mux.HandleFunc("POST /api/tasks/{id}/goals", s.addGoal)                        // 目标管理:人工新增目标(复活任务)
 	mux.HandleFunc("PATCH /api/tasks/{id}/goals/{gid}", s.editGoal)                // 目标管理:修改目标(复活任务)
@@ -906,6 +907,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sync/scopesentry/projects", s.syncSSProjects)
 	mux.HandleFunc("GET /api/sync/scopesentry/tasks", s.syncSSTasks)
 	mux.HandleFunc("POST /api/sync/scopesentry/sync", s.syncSSRun)
+	// 资产同步 — FOFA 数据源
+	mux.HandleFunc("GET /api/sync/fofa/status", s.syncFofaStatus)
+	mux.HandleFunc("POST /api/sync/fofa/datasource", s.syncFofaDatasource)
+	mux.HandleFunc("POST /api/sync/fofa/query", s.syncFofaQuery)
+	mux.HandleFunc("POST /api/sync/fofa/sync", s.syncFofaRun)
+	// 漏洞 IM 推送
+	mux.HandleFunc("GET /api/notify/meta", s.notifyMeta)
+	mux.HandleFunc("GET /api/notify/channels", s.notifyListChannels)
+	mux.HandleFunc("POST /api/notify/channels", s.notifyCreateChannel)
+	mux.HandleFunc("PATCH /api/notify/channels/{id}", s.notifyUpdateChannel)
+	mux.HandleFunc("DELETE /api/notify/channels/{id}", s.notifyDeleteChannel)
+	mux.HandleFunc("POST /api/notify/channels/{id}/test", s.notifyTestChannel)
+	mux.HandleFunc("GET /api/notify/deliveries", s.notifyListDeliveries)
+	mux.HandleFunc("POST /api/notify/deliveries/{id}/retry", s.notifyRetryDelivery)
 	// Skill CRUD (文件系统)
 	mux.HandleFunc("GET /api/skills", s.fsListSkills)
 	mux.HandleFunc("POST /api/skills", s.fsCreateSkill)
@@ -954,6 +969,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/intercept/tool-config", s.interceptSetToolConfig)
 	mux.HandleFunc("GET /api/intercept/judge", s.interceptGetJudgeConfig)
 	mux.HandleFunc("PUT /api/intercept/judge", s.interceptSetJudgeConfig)
+
+	// 资产拦截（全局黑名单）
+	mux.HandleFunc("GET /api/asset-intercept/rules", s.assetInterceptListRules)
+	mux.HandleFunc("POST /api/asset-intercept/rules", s.assetInterceptCreateRule)
+	mux.HandleFunc("PUT /api/asset-intercept/rules/{id}", s.assetInterceptUpdateRule)
+	mux.HandleFunc("DELETE /api/asset-intercept/rules/{id}", s.assetInterceptDeleteRule)
+	mux.HandleFunc("POST /api/asset-intercept/rules/{id}/toggle", s.assetInterceptToggleRule)
+	// 资产拦截（任务级 block/allow）
+	mux.HandleFunc("GET /api/tasks/{id}/intercept-rules", s.taskInterceptListRules)
+	mux.HandleFunc("POST /api/tasks/{id}/intercept-rules", s.taskInterceptCreateRule)
+	mux.HandleFunc("PUT /api/tasks/{id}/intercept-rules/{rid}", s.taskInterceptUpdateRule)
+	mux.HandleFunc("DELETE /api/tasks/{id}/intercept-rules/{rid}", s.taskInterceptDeleteRule)
+	mux.HandleFunc("POST /api/tasks/{id}/intercept-rules/{rid}/toggle", s.taskInterceptToggleRule)
 
 	// 一键放行(guard auto-allow):带时限的 ask 审批自动放行开关
 	mux.HandleFunc("GET /api/guard/auto-allow", s.guardAutoAllowGet)
@@ -1510,6 +1538,8 @@ type createTaskReq struct {
 	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
 	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
+	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
+	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1556,11 +1586,17 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.CompanyIDs = companyIDs
+	interceptRules, err := buildTaskInterceptRules(req.InterceptRules)
+	if err != nil {
+		writeErr(w, 400, "任务级拦截规则无效："+err.Error())
+		return
+	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 		CoverageEnabled: req.CoverageEnabled,
+		InterceptRules:  interceptRules,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {
@@ -2341,14 +2377,17 @@ func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "bad status: "+*body.Status)
 			return
 		}
-		n, err := s.m.pg.SetFindingStatus(id, *body.Status)
+		from, found, notified, err := s.m.pg.SetFindingStatusWithNotify(r.Context(), id, *body.Status)
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
-		if n == 0 {
+		if !found {
 			writeErr(w, 404, "finding not found")
 			return
+		}
+		if !notified && from != *body.Status {
+			log.Printf("[notify] 状态变更事件未登记 finding=%d %s→%s（状态已更新）", id, from, *body.Status)
 		}
 	}
 	if body.Severity != nil {
@@ -3205,20 +3244,26 @@ func (s *Server) settingsPayload() map[string]any {
 	if concLimit == 0 {
 		concLimit = defaultConcurrencyLimit // 关闭时也回显一个合理默认值给 UI
 	}
+	notifyBase, _, _ := s.m.pg.GetSetting(settingNotifyPublicBaseURL)
+	notifyDigestRaw, _, _ := s.m.pg.GetSetting(settingNotifyDigestMinutes)
+	notifyDigest, _ := strconv.Atoi(strings.TrimSpace(notifyDigestRaw))
 	return map[string]any{
-		"traffic_capture":          s.m.TrafficEnabled(),
-		"agent_traffic_binding":    s.m.pg.GetBool(settingAgentTrafficBinding, false),
-		"llm_record":               s.m.LLMRecordEnabled(),
-		"web_search_enabled":       on,
-		"web_search_backend":       backend,
-		"brave_key_set":            strings.TrimSpace(braveKey) != "",
-		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":         proxy,                       // 独立出口代理(http/https/socks5)，空=直连
-		"global_proxy":             s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
-		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
-		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
-		"task_concurrency_enabled": concOn,                      // 任务并发上限开关(默认关)
-		"task_concurrency_limit":   concLimit,                   // 同时运行任务上限(开启后默认5)
+		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
+		"notify_public_base_url":     notifyBase,
+		"notify_digest_interval_min": notifyDigest,
+		"traffic_capture":            s.m.TrafficEnabled(),
+		"agent_traffic_binding":      s.m.pg.GetBool(settingAgentTrafficBinding, false),
+		"llm_record":                 s.m.LLMRecordEnabled(),
+		"web_search_enabled":         on,
+		"web_search_backend":         backend,
+		"brave_key_set":              strings.TrimSpace(braveKey) != "",
+		"tavily_key_set":             strings.TrimSpace(tavilyKey) != "",
+		"web_search_proxy":           proxy,                       // 独立出口代理(http/https/socks5)，空=直连
+		"global_proxy":               s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"python_interpreter":         strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
+		"workers":                    s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"task_concurrency_enabled":   concOn,                      // 任务并发上限开关(默认关)
+		"task_concurrency_limit":     concLimit,                   // 同时运行任务上限(开启后默认5)
 		// LLM 轮询(故障转移)。默认关；开启后走全局激活配置的 agent 在当前配置不可用时
 		// 自动切到下一个配置。bind_fallback 仅在轮询开启时有意义(默认关)。
 		"llm_pool_enabled":       s.m.LLMPoolEnabled(),
@@ -3271,10 +3316,41 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// 操作约束注入范围开关(默认都开);即时生效(planner/worker 每轮读),无需重建 agent。
 		ConstraintsInjectPlanner *bool `json:"constraints_inject_planner"`
 		ConstraintsInjectWorker  *bool `json:"constraints_inject_worker"`
+		// 漏洞 IM 推送全局设置。
+		NotifyEnabled    *bool   `json:"notify_enabled"`
+		NotifyBaseURL    *string `json:"notify_public_base_url"`
+		NotifyDigestMins *int    `json:"notify_digest_interval_min"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if req.NotifyEnabled != nil {
+		if err := s.m.pg.SetBool(settingNotifyEnabled, *req.NotifyEnabled); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.NotifyBaseURL != nil {
+		base := strings.TrimSpace(*req.NotifyBaseURL)
+		if base != "" && !strings.HasPrefix(strings.ToLower(base), "http://") && !strings.HasPrefix(strings.ToLower(base), "https://") {
+			writeErr(w, 400, "回链地址必须以 http:// 或 https:// 开头")
+			return
+		}
+		if err := s.m.pg.SetSetting(settingNotifyPublicBaseURL, strings.TrimRight(base, "/")); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.NotifyDigestMins != nil {
+		if *req.NotifyDigestMins < 1 || *req.NotifyDigestMins > 24*60 {
+			writeErr(w, 400, "汇总周期需在 1–1440 分钟之间")
+			return
+		}
+		if err := s.m.pg.SetSetting(settingNotifyDigestMinutes, strconv.Itoa(*req.NotifyDigestMins)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	if req.ConstraintsInjectPlanner != nil {
 		if err := s.m.pg.SetBool(settingConstraintsInjectPlanner, *req.ConstraintsInjectPlanner); err != nil {

@@ -1354,3 +1354,95 @@ CREATE INDEX IF NOT EXISTS idx_tunnels_state ON tunnels(state);
 -- honeypot_evidence: 命中签名证据,JSON 数组文本(如 ["cowrie_default_ssh_banner(Cowrie, 0.99)"]),合并去重。
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS honeypot_score REAL NOT NULL DEFAULT 0;
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS honeypot_evidence TEXT NOT NULL DEFAULT '';
+
+-- =====================================================================
+-- N. 资产拦截（全局黑名单 + 任务级拦截/允许）
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS asset_intercept_rules (
+    id          BIGSERIAL PRIMARY KEY,
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    kind        TEXT NOT NULL CHECK (kind IN (
+                    'exact_domain', 'exact_ip', 'exact_url',
+                    'fuzzy_domain', 'fuzzy_ip', 'fuzzy_url',
+                    'cidr')),
+    pattern     TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    builtin     BOOLEAN NOT NULL DEFAULT false,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_asset_intercept_enabled ON asset_intercept_rules(enabled);
+DROP TRIGGER IF EXISTS trg_asset_intercept_rules_upd ON asset_intercept_rules;
+CREATE TRIGGER trg_asset_intercept_rules_upd BEFORE UPDATE ON asset_intercept_rules
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS task_intercept_rules (
+    id          BIGSERIAL PRIMARY KEY,
+    task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    action      TEXT NOT NULL DEFAULT 'block' CHECK (action IN ('block','allow')),
+    kind        TEXT NOT NULL CHECK (kind IN (
+                    'exact_domain', 'exact_ip', 'exact_url',
+                    'fuzzy_domain', 'fuzzy_ip', 'fuzzy_url',
+                    'cidr')),
+    pattern     TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_task_intercept_task ON task_intercept_rules(task_id);
+ALTER TABLE task_intercept_rules ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'block';
+DROP TRIGGER IF EXISTS trg_task_intercept_rules_upd ON task_intercept_rules;
+CREATE TRIGGER trg_task_intercept_rules_upd BEFORE UPDATE ON task_intercept_rules
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =====================================================================
+-- O. 漏洞 IM 推送
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS notification_channels (
+    id           BIGSERIAL PRIMARY KEY,
+    name         TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    enabled      BOOLEAN NOT NULL DEFAULT true,
+    config       JSONB NOT NULL DEFAULT '{}',
+    mode         TEXT NOT NULL DEFAULT 'realtime',
+    filter       JSONB NOT NULL DEFAULT '{}',
+    rate_per_min INTEGER NOT NULL DEFAULT 20,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+DROP TRIGGER IF EXISTS trg_notification_channels_upd ON notification_channels;
+CREATE TRIGGER trg_notification_channels_upd BEFORE UPDATE ON notification_channels
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS notification_events (
+    id         BIGSERIAL PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    finding_id BIGINT NOT NULL,
+    snapshot   JSONB NOT NULL,
+    fanned_out BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notification_events_pending
+    ON notification_events(id) WHERE NOT fanned_out;
+
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+    id          BIGSERIAL PRIMARY KEY,
+    event_id    BIGINT NOT NULL REFERENCES notification_events(id) ON DELETE CASCADE,
+    channel_id  BIGINT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    state       TEXT NOT NULL DEFAULT 'pending',
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_error  TEXT NOT NULL DEFAULT '',
+    batch_id    BIGINT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_due
+    ON notification_deliveries(next_attempt_at) WHERE state='pending';
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_history
+    ON notification_deliveries(id DESC);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
+    ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
+    ON notification_deliveries(channel_id, id DESC);

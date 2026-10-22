@@ -13,8 +13,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import type { SSProject, SSTask } from "@/lib/types";
+import type { FofaRow, SSProject, SSTask } from "@/lib/types";
 
 type SSStatus = {
   exists: boolean;
@@ -23,6 +24,12 @@ type SSStatus = {
   reachable: boolean;
   url?: string;
   tools: string[];
+};
+
+type FofaStatus = {
+  configured: boolean;
+  reachable: boolean;
+  email: string;
 };
 
 type Dimension = "project" | "task";
@@ -43,9 +50,13 @@ export default function AssetSyncPage() {
       <Tabs defaultValue="scopesentry">
         <TabsList>
           <TabsTrigger value="scopesentry">ScopeSentry</TabsTrigger>
+          <TabsTrigger value="fofa">FOFA</TabsTrigger>
         </TabsList>
         <TabsContent value="scopesentry" className="mt-4">
           <ScopeSentryPanel />
+        </TabsContent>
+        <TabsContent value="fofa" className="mt-4">
+          <FofaPanel />
         </TabsContent>
       </Tabs>
     </div>
@@ -462,6 +473,310 @@ function SyncResult({ result }: { result: Awaited<ReturnType<typeof api.ssSync>>
             {labels[k] ?? k}: {v}
           </Badge>
         ))}
+      </div>
+      {result.companies && result.companies.length > 0 && (
+        <p className="text-muted-foreground">新建/更新企业：{result.companies.join("、")}</p>
+      )}
+      {result.warnings && result.warnings.length > 0 && (
+        <ul className="list-inside list-disc text-amber-600 dark:text-amber-500">
+          {result.warnings.map((wm) => (
+            <li key={wm}>{wm}</li>
+          ))}
+        </ul>
+      )}
+      {result.errors && result.errors.length > 0 && (
+        <ul className="list-inside list-disc text-destructive">
+          {result.errors.slice(0, 20).map((em) => (
+            <li key={em}>{em}</li>
+          ))}
+          {result.errors.length > 20 && <li>…共 {result.errors.length} 条错误</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ── FOFA 数据源 ──────────────────────────────────────────────────────────────
+
+function FofaPanel() {
+  const [status, setStatus] = React.useState<FofaStatus | null>(null);
+  const [loadingStatus, setLoadingStatus] = React.useState(true);
+
+  const loadStatus = React.useCallback(() => {
+    setLoadingStatus(true);
+    api
+      .fofaStatus()
+      .then(setStatus)
+      .catch((e) => toast.error(`读取 FOFA 状态失败：${e.message}`))
+      .finally(() => setLoadingStatus(false));
+  }, []);
+
+  React.useEffect(() => {
+    loadStatus();
+  }, [loadStatus]);
+
+  return (
+    <div className="space-y-4">
+      <FofaDataSourceCard status={status} loading={loadingStatus} onChanged={loadStatus} />
+      {status?.configured ? (
+        <FofaWorkbench />
+      ) : (
+        <Card>
+          <CardContent className="py-8 text-center text-muted-foreground text-sm">
+            填写并保存 FOFA 账号（Email 可选，API Key 必填）后即可查询并导入资产。
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function FofaStatusBadge({ status, loading }: { status: FofaStatus | null; loading: boolean }) {
+  if (loading || !status) return <Badge variant="secondary">检测中…</Badge>;
+  if (!status.configured) return <Badge variant="outline">未配置</Badge>;
+  if (status.reachable)
+    return (
+      <Badge className="bg-emerald-600 hover:bg-emerald-600">
+        <CheckCircle2Icon className="mr-1 size-3" /> 已连接
+      </Badge>
+    );
+  return (
+    <Badge variant="destructive">
+      <AlertCircleIcon className="mr-1 size-3" /> 不可达
+    </Badge>
+  );
+}
+
+function FofaDataSourceCard({
+  status,
+  loading,
+  onChanged,
+}: {
+  status: FofaStatus | null;
+  loading: boolean;
+  onChanged: () => void;
+}) {
+  const [email, setEmail] = React.useState("");
+  const [apiKey, setApiKey] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    if (status?.email) setEmail(status.email);
+  }, [status?.email]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const r = await api.fofaDatasource({ email: email.trim(), key: apiKey.trim() });
+      toast.success(r.configured ? "已保存 FOFA 账号" : "已保存（尚未填写 API Key）");
+      setApiKey("");
+      onChanged();
+    } catch (e) {
+      toast.error(`保存失败：${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <PlugZapIcon className="size-4" /> FOFA 账号
+          <FofaStatusBadge status={status} loading={loading} />
+        </CardTitle>
+        <Button variant="ghost" size="sm" onClick={onChanged} disabled={loading}>
+          <RefreshCwIcon className={loading ? "size-4 animate-spin" : "size-4"} /> 刷新
+        </Button>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label>Email（账号，可留空仅用 Key）</Label>
+            <Input placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>API Key（留空保留原值）</Label>
+            <Input
+              type="password"
+              placeholder="FOFA API Key"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button onClick={save} disabled={busy}>
+            保存
+          </Button>
+          <span className="text-muted-foreground text-xs">
+            凭据存于本地数据库，密钥不会回显；FOFA 调用走系统全局代理（若已配置）。
+          </span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function FofaWorkbench() {
+  const [query, setQuery] = React.useState("");
+  const [size, setSize] = React.useState("100");
+  const [createCompany, setCreateCompany] = React.useState(false);
+  const [companyName, setCompanyName] = React.useState("");
+  const [previewing, setPreviewing] = React.useState(false);
+  const [syncing, setSyncing] = React.useState(false);
+  const [rows, setRows] = React.useState<FofaRow[]>([]);
+  const [total, setTotal] = React.useState<number | null>(null);
+  const [result, setResult] = React.useState<Awaited<ReturnType<typeof api.fofaSync>> | null>(null);
+
+  const sizeNum = Math.max(1, Math.min(5000, Math.floor(Number(size) || 100)));
+
+  const preview = async () => {
+    if (!query.trim()) return toast.error("请填写 FOFA 查询语句");
+    setPreviewing(true);
+    setResult(null);
+    try {
+      const r = await api.fofaQuery({ query: query.trim(), size: Math.min(sizeNum, 100) });
+      setRows(r.rows);
+      setTotal(r.total);
+      toast.success(`命中约 ${r.total} 条，预览 ${r.rows.length} 条`);
+    } catch (e) {
+      toast.error(`查询失败：${(e as Error).message}`);
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const runSync = async () => {
+    if (!query.trim()) return toast.error("请填写 FOFA 查询语句");
+    if (createCompany && !companyName.trim()) return toast.error("勾选创建企业时请填写企业名称");
+    setSyncing(true);
+    setResult(null);
+    try {
+      const r = await api.fofaSync({
+        query: query.trim(),
+        size: sizeNum,
+        create_company: createCompany,
+        company_name: companyName.trim(),
+      });
+      setResult(r);
+      toast.success(`导入完成，入库 ${r.imported ?? 0} 条资产`);
+    } catch (e) {
+      toast.error(`导入失败：${(e as Error).message}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">FOFA 查询与导入</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-1.5">
+          <Label htmlFor="fofa-query">查询语句（FOFA 语法）</Label>
+          <Textarea
+            id="fofa-query"
+            className="min-h-20 font-mono text-sm"
+            placeholder={'domain="example.com"\nip="1.2.3.4/24"\ntitle="后台" && country="CN"'}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <p className="text-muted-foreground text-xs">
+            用 FOFA 语法检索；预览最多 100 条，导入最多 {sizeNum} 条（上限 5000）。
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-2">
+            <Label htmlFor="fofa-size" className="text-sm">
+              数量上限
+            </Label>
+            <Input id="fofa-size" className="w-24" value={size} onChange={(e) => setSize(e.target.value)} />
+          </div>
+          <label htmlFor="fofa-create-company" className="flex items-center gap-1.5 text-sm">
+            <Checkbox
+              id="fofa-create-company"
+              checked={createCompany}
+              onCheckedChange={(c) => setCreateCompany(!!c)}
+            />
+            创建企业并写入资产范围
+          </label>
+          {createCompany && (
+            <Input
+              className="max-w-xs"
+              placeholder="企业名称"
+              value={companyName}
+              onChange={(e) => setCompanyName(e.target.value)}
+            />
+          )}
+          <div className="flex-1" />
+          <Button variant="outline" onClick={preview} disabled={previewing || syncing}>
+            <SearchIcon className={previewing ? "size-4 animate-pulse" : "size-4"} /> 预览
+          </Button>
+          <Button onClick={runSync} disabled={syncing || previewing}>
+            <DownloadIcon className={syncing ? "size-4 animate-pulse" : "size-4"} /> 导入资产
+          </Button>
+        </div>
+
+        {rows.length > 0 && (
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Host</TableHead>
+                  <TableHead>IP</TableHead>
+                  <TableHead>端口</TableHead>
+                  <TableHead>协议</TableHead>
+                  <TableHead>标题</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((row, i) => (
+                  <TableRow key={`${row.host}-${i}`}>
+                    <TableCell className="font-medium">{row.host || "—"}</TableCell>
+                    <TableCell>{row.ip || "—"}</TableCell>
+                    <TableCell>{row.port || "—"}</TableCell>
+                    <TableCell>{row.protocol || "—"}</TableCell>
+                    <TableCell className="max-w-xs truncate" title={row.title}>
+                      {row.title || "—"}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+        {total != null && (
+          <p className="text-muted-foreground text-xs">
+            FOFA 命中约 {total} 条（预览展示前 {rows.length} 条）。
+          </p>
+        )}
+
+        {result && <FofaResult result={result} />}
+      </CardContent>
+    </Card>
+  );
+}
+
+function FofaResult({ result }: { result: Awaited<ReturnType<typeof api.fofaSync>> }) {
+  const synced = result.synced ?? {};
+  const labels: Record<string, string> = { service: "服务", ip: "IP", subdomain: "子域名", domain: "根域名" };
+  return (
+    <div className="space-y-2 rounded-md border bg-muted/40 p-3 text-sm">
+      <div className="flex flex-wrap items-center gap-3">
+        <Badge variant="secondary">导入 {result.imported ?? 0} 条</Badge>
+        {Object.entries(synced).map(([k, v]) => (
+          <Badge key={k} variant="outline">
+            {labels[k] ?? k}: {v}
+          </Badge>
+        ))}
+        {result.truncated && (
+          <Badge variant="outline" className="text-amber-600">
+            已达上限截断
+          </Badge>
+        )}
       </div>
       {result.companies && result.companies.length > 0 && (
         <p className="text-muted-foreground">新建/更新企业：{result.companies.join("、")}</p>

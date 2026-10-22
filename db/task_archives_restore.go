@@ -92,6 +92,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		{`DELETE FROM task_asset_links WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_llm_profiles WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_scope WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM task_intercept_rules WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_constraints WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM activity WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM exploration_nodes WHERE exploration_id=$1`, []any{expID}},
@@ -261,6 +262,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 		return nil, err
 	} else {
 		warnings = append(warnings, warning...)
+	}
+	if err := restoreTaskInterceptRules(tx, taskID, remappedTables["task_intercept_rules"]); err != nil {
+		return nil, fmt.Errorf("restore task_intercept_rules: %w", err)
 	}
 	if warning, err := restoreTaskLLMProfiles(tx, remappedTables["task_llm_profiles"]); err != nil {
 		return nil, err
@@ -634,6 +638,31 @@ func restoreTaskScopes(tx *sql.Tx, raw json.RawMessage) ([]string, error) {
 	encoded, _ := json.Marshal(kept)
 	_, err = tx.Exec(`INSERT INTO task_scope SELECT * FROM json_populate_recordset(NULL::task_scope,$1::json) ON CONFLICT DO NOTHING`, string(encoded))
 	return warnings, err
+}
+
+// restoreTaskInterceptRules 把归档中的任务级资产拦截/允许规则重新挂到恢复后的
+// 新任务 id 上。归档行里的 id/task_id 属于旧任务，不能直接 INSERT SELECT。
+func restoreTaskInterceptRules(tx *sql.Tx, taskID int64, raw json.RawMessage) error {
+	rows, err := decodeArchiveRows(raw)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		enabled, _ := row["enabled"].(bool)
+		action, _ := row["action"].(string)
+		kind, _ := row["kind"].(string)
+		pattern, _ := row["pattern"].(string)
+		note, _ := row["note"].(string)
+		if kind == "" || pattern == "" {
+			continue
+		}
+		if _, err := tx.Exec(`
+INSERT INTO task_intercept_rules(task_id, enabled, action, kind, pattern, note)
+VALUES ($1,$2,$3,$4,$5,$6)`, taskID, enabled, normalizeRuleAction(action), kind, pattern, note); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func restoreTaskLLMProfiles(tx *sql.Tx, raw json.RawMessage) ([]string, error) {

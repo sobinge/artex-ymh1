@@ -153,7 +153,8 @@ type TaskCreateOptions struct {
 	PlanHeartbeatSeconds int
 	// CoverageEnabled 是「资产覆盖度功能」开关;nil=默认开(true)，让不关心该开关的创建
 	// 路径(编排 spawn、老 API)沿用原行为。仅 web 创建任务时可显式传 false 关闭。
-	CoverageEnabled *bool
+	CoverageEnabled *bool // InterceptRules 是任务级资产拦截/允许规则，创建时随任务在同一事务内写入。
+	InterceptRules  []TaskInterceptRuleInput
 }
 
 // CreateTaskWithOptions creates an exploration, task, direct source relations,
@@ -230,6 +231,9 @@ RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, descripti
 		return nil, err
 	}
 	if err := insertTaskRelations(tx, t.ID, opts.SourceTaskIDs); err != nil {
+		return nil, err
+	}
+	if err := insertTaskInterceptRules(tx, t.ID, opts.InterceptRules); err != nil {
 		return nil, err
 	}
 	if err := insertTaskCompanies(tx, t.ID, opts.CompanyIDs); err != nil {

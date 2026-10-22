@@ -154,6 +154,11 @@ func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmProfileID, exhaustedAt, chainCreatedAt); err != nil {
 		t.Fatal(err)
 	}
+	interceptPattern := fmt.Sprintf("archive-block-%d.example", task.ID)
+	if _, err := d.Exec(`INSERT INTO task_intercept_rules(task_id,enabled,action,kind,pattern,note)
+VALUES($1,true,'block','exact_domain',$2,'archive rule')`, task.ID, interceptPattern); err != nil {
+		t.Fatal(err)
+	}
 	defer func() {
 		_, _ = d.Exec(`DELETE FROM llm_usage WHERE task_id=$1 OR exploration_id=$2`, fmt.Sprint(task.ID), task.ExplorationID)
 		_, _ = d.Exec(`DELETE FROM skill_usage WHERE task_id=$1 OR exploration_id=$2`, task.ID, task.ExplorationID)
@@ -221,6 +226,9 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}
 	if snapshot.DataCounts["assets"] != 1 || snapshot.DataCounts["exploration_nodes"] < 2 {
 		t.Fatalf("unexpected snapshot counts: %#v", snapshot.DataCounts)
+	}
+	if snapshot.DataCounts["task_intercept_rules"] != 1 {
+		t.Fatalf("task intercept rules not archived: %#v", snapshot.DataCounts)
 	}
 	if err := d.CompleteTaskArchive(archive.ID, snapshot, "/tmp/test-task.tar.zst", "abc", 100, 50); err != nil {
 		t.Fatal(err)
@@ -296,6 +304,13 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}
 	if nodes < 2 || assets != 1 || usage != 1 {
 		t.Fatalf("restore incomplete nodes=%d assets=%d usage=%d", nodes, assets, usage)
+	}
+	var restoredInterceptPattern string
+	if err := d.QueryRow(`SELECT pattern FROM task_intercept_rules WHERE task_id=$1`, task.ID).Scan(&restoredInterceptPattern); err != nil {
+		t.Fatalf("task intercept rule missing after restore: %v", err)
+	}
+	if restoredInterceptPattern != interceptPattern {
+		t.Fatalf("restored intercept pattern=%q, want %q", restoredInterceptPattern, interceptPattern)
 	}
 	var restoredRawRequest, restoredRawResponse string
 	if err := d.QueryRow(`SELECT COALESCE(raw_request,''),COALESCE(raw_response,'') FROM llm_records WHERE task_id=$1`, fmt.Sprint(task.ID)).
